@@ -1,10 +1,24 @@
 // ==UserScript==
 // @name         Odoo – Recherche Client par Téléphone (Many2one)
-// @version      0.2
+// @version      0.3
 // @description  Active la recherche "Téléphone/Mobile" automatiquement dans le champ Client des tickets Odoo.
 // @author       Alexis.sair
 // @match        https://winprovence.odoo.com/*
 // @match        http://winprovence.odoo.com/*
+// @match        https://winprovence.odoo.com/*
+// @match        http://winprovence.odoo.com/*
+// @match        https://*/web*
+// @match        http://*/web*
+// @match        https://winprovence.odoo.com/*
+// @match        https://*.odoo.com/*
+// @match        https://winprovence.fr/*
+// @match        http://winprovence.fr/*
+// @match        https://*.winprovence.fr/*
+// @match        http://*.winprovence.fr/*
+// @match        https://www.winprovence.fr/*
+// @match        http://www.winprovence.fr/*
+// @match        https://winprovence.odoo.fr/*
+// @match        http://winprovence.odoo.fr/*
 // @updateURL    https://raw.githubusercontent.com/lax3is/rechercheparnumerodDEV/refs/heads/main/rechnum.js
 // @downloadURL  https://raw.githubusercontent.com/lax3is/rechercheparnumerodDEV/refs/heads/main/rechnum.js
 // @grant        none
