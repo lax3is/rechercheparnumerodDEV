@@ -1,8 +1,9 @@
 // ==UserScript==
 // @name         Odoo – Recherche Client par Téléphone (Many2one)
-// @version      0.3
+// @namespace    https://votre-domaine
+// @version      0.4
 // @description  Active la recherche "Téléphone/Mobile" automatiquement dans le champ Client des tickets Odoo.
-// @author       Alexis.sair
+// @match        *://*/web*
 // @match        https://winprovence.odoo.com/*
 // @match        http://winprovence.odoo.com/*
 // @match        https://winprovence.odoo.com/*
@@ -19,8 +20,6 @@
 // @match        http://www.winprovence.fr/*
 // @match        https://winprovence.odoo.fr/*
 // @match        http://winprovence.odoo.fr/*
-// @updateURL    https://raw.githubusercontent.com/lax3is/rechercheparnumerodDEV/refs/heads/main/rechnum.js
-// @downloadURL  https://raw.githubusercontent.com/lax3is/rechercheparnumerodDEV/refs/heads/main/rechnum.js
 // @grant        none
 // ==/UserScript==
 
@@ -371,14 +370,14 @@
     const wrapper = document.createElement('div');
     wrapper.className = 'tm-tel-helper-wrapper';
     wrapper.style.marginTop = '6px';
-    wrapper.style.display = 'inline-flex';
+    wrapper.style.display = 'flex';
     wrapper.style.gap = '6px';
 
     const telInput = document.createElement('input');
     telInput.type = 'text';
     telInput.placeholder = 'n° téléphone';
     telInput.title = 'Rechercher par téléphone (+33, espaces et points acceptés)';
-    telInput.style.width = '140px';
+    telInput.style.width = '180px';
     telInput.style.padding = '2px 6px';
     telInput.style.fontSize = '12px';
     telInput.className = 'tm-tel-helper-input';
@@ -412,14 +411,75 @@
 
     wrapper.appendChild(telInput);
     wrapper.appendChild(btn);
-    // Insérer SOUS le widget many2one (visuel stable)
-    if (widget && widget.parentElement) {
-      widget.insertAdjacentElement('afterend', wrapper);
-    } else if (input.parentElement) {
-      input.parentElement.appendChild(wrapper);
+    // Insérer SOUS le champ Client, dans la zone Odoo .o_field_many2one_extra
+    let host =
+      widget.querySelector('.o_field_many2one_extra') ||
+      (widget.parentElement && widget.parentElement.querySelector('.o_field_many2one_extra'));
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'o_field_many2one_extra';
+      widget.appendChild(host);
     }
+    host.appendChild(wrapper);
 
     // Si une UI flottante existe déjà, la retirer pour éviter la duplication
+    removeFloatingPhoneUI();
+  }
+
+  function ensurePhoneSearchUIAtBottom(root = document) {
+    const input = findClientInput(root);
+    if (!input) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'tm-tel-helper-wrapper';
+    wrapper.style.marginTop = '12px';
+    wrapper.style.display = 'flex';
+    wrapper.style.gap = '6px';
+
+    const telInput = document.createElement('input');
+    telInput.type = 'text';
+    telInput.placeholder = 'n° téléphone';
+    telInput.title = 'Rechercher par téléphone (+33, espaces et points acceptés)';
+    telInput.style.width = '200px';
+    telInput.style.padding = '2px 6px';
+    telInput.style.fontSize = '12px';
+    telInput.className = 'tm-tel-helper-input';
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.textContent = 'Rech. tel';
+    btn.style.fontSize = '12px';
+    btn.style.padding = '2px 6px';
+
+    const doSearch = () => {
+      const q = (telInput.value || '').trim();
+      if (!q) return;
+      rpcSearchPartnerByPhone(q, { limit: 20 })
+        .then(async ({ records }) => {
+          if (records && records.length) {
+            const chosen = records[0];
+            await selectPartnerInMany2One(input, chosen);
+          }
+        })
+        .catch(() => {});
+    };
+    btn.addEventListener('click', doSearch);
+    telInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        doSearch();
+      }
+    });
+
+    wrapper.appendChild(telInput);
+    wrapper.appendChild(btn);
+
+    const sheet =
+      root.querySelector('.o_form_sheet') ||
+      root.querySelector('.o_form_sheet_bg') ||
+      root.querySelector('.o_form_view') ||
+      document.body;
+    sheet.appendChild(wrapper);
     removeFloatingPhoneUI();
   }
 
@@ -437,8 +497,19 @@
   }
 
   function ensureUIByClientLabel(root = document) {
-    // Si déjà présent quelque part sur la page, ne rien faire
-    if (document.querySelector('.tm-tel-helper-input')) return;
+    // Ne pas court-circuiter si une UI flottante existe; on veut injecter localement et la retirer ensuite
+
+    // Ciblage direct par id 'partner_id' si présent (Odoo ajoute souvent cet id)
+    const byIdInput = root.querySelector('input#partner_id');
+    if (byIdInput) {
+      const byIdWidget = byIdInput.closest('.o_field_many2one, .o_field_widget');
+      if (byIdWidget) {
+        ensurePhoneSearchUI(byIdWidget, byIdInput);
+        attachToInput(byIdInput);
+        removeFloatingPhoneUI();
+        return;
+      }
+    }
 
     const labels = Array.from(root.querySelectorAll('label, .o_form_label, .o_form_label_help'));
     const clientLabels = labels.filter((l) => /^client$/i.test((l.textContent || '').trim()));
@@ -459,6 +530,7 @@
 
   function findClientInput(root = document) {
     const selectors = [
+      'input#partner_id',
       '.o_field_many2one[name="partner_id"] input',
       '.o_field_widget[name="partner_id"] input',
       '.o_field_many2one[data-name="partner_id"] input',
@@ -709,11 +781,13 @@
   }
 
   function scanAndAttach(root = document) {
-    // Limiter au contexte Tickets (helpdesk.ticket en vue formulaire)
-    if (!isTicketFormContext()) {
+    // Injecter uniquement si un champ Client (partner_id) est présent dans la vue
+    if (!findClientInput(document)) {
       cleanupAllHelpers();
       return;
     }
+    // Retirer l'UI flottante si elle existe encore
+    removeFloatingPhoneUI();
     const inputs = Array.from(
       root.querySelectorAll('.o_field_many2one input, .o_field_widget.o_field_many2one input')
     );
@@ -729,8 +803,10 @@
     cleanupWrongHelpers();
     // En dernier recours, injecter via libellé "Client"
     ensureUIByClientLabel(root);
-    // Toujours proposer la mini UI flottante
-    ensureFloatingPhoneUI();
+    // Si l'aide n'a pas été créée, placer en bas du formulaire
+    if (!document.querySelector('.tm-tel-helper-input')) {
+      ensurePhoneSearchUIAtBottom(root);
+    }
   }
 
   // Lancement initial + observation du DOM (changement de formulaire/onglet)
