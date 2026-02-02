@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odoo – Recherche Client par Téléphone (Many2one)
 // @namespace    https://votre-domaine
-// @version      0.4
+// @version      1.2
 // @description  Active la recherche "Téléphone/Mobile" automatiquement dans le champ Client des tickets Odoo.
 // @match        *://*/web*
 // @match        https://winprovence.odoo.com/*
@@ -32,6 +32,7 @@
   const FORCE_HOTKEY = 'p';            // Alt+P force la recherche téléphone
   const TEL_PREFIX = 'tel:';           // saisir "tel:0494..." force la recherche
   const INTERNAL_INPUT_FLAG = 'tmTelInternal'; // drapeau pour ignorer les événements 'input' déclenchés par le script
+  let THEME_STYLES_INJECTED = false;
 
   // Utilitaires
   const isDigitsLike = (s) => /^[+\d][\d .-]{2,}$/.test(s);
@@ -66,6 +67,41 @@
       if (found) return found;
     }
     return null;
+  }
+
+  // -----------------------------
+  // Styles - harmonisation visuelle avec Odoo
+  // -----------------------------
+  function ensureThemeStyles() {
+    if (THEME_STYLES_INJECTED) return;
+    THEME_STYLES_INJECTED = true;
+    const style = document.createElement('style');
+    style.setAttribute('data-tm', 'tel-helper-styles');
+    style.textContent = `
+      .tm-tel-helper-wrapper{
+        display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      }
+      .tm-tel-helper-wrapper .tm-tel-input{
+        border-radius:8px; padding:6px 10px; min-width:220px; height:32px;
+        background: var(--o-input-bg, var(--o-view-background-color, transparent));
+        border: 1px solid var(--o-input-border-color, rgba(255,255,255,0.12));
+        color: var(--o-text-color, inherit);
+      }
+      .tm-tel-helper-wrapper .tm-tel-input:focus{
+        outline: none;
+        box-shadow: 0 0 0 2px rgba(135,90,123,.35);
+        border-color: var(--o-brand-primary, #875a7b);
+      }
+      .tm-tel-helper-wrapper .tm-tel-btn{
+        border-radius:8px; padding:6px 12px;
+        background: var(--o-brand-odoo, var(--o-brand-primary, #875a7b));
+        border: 1px solid transparent; color: var(--o-button-text-color, #fff);
+      }
+      .tm-tel-helper-wrapper .tm-tel-btn:hover{
+        filter: brightness(1.08);
+      }
+    `;
+    document.head.appendChild(style);
   }
 
   // -----------------------------
@@ -367,6 +403,7 @@
     if (widget.dataset.tmTelUiAttached) return;
     widget.dataset.tmTelUiAttached = '1';
 
+    ensureThemeStyles();
     const wrapper = document.createElement('div');
     wrapper.className = 'tm-tel-helper-wrapper';
     wrapper.style.marginTop = '6px';
@@ -377,16 +414,17 @@
     telInput.type = 'text';
     telInput.placeholder = 'n° téléphone';
     telInput.title = 'Rechercher par téléphone (+33, espaces et points acceptés)';
-    telInput.style.width = '180px';
+    telInput.style.width = '220px';
     telInput.style.padding = '2px 6px';
     telInput.style.fontSize = '12px';
-    telInput.className = 'tm-tel-helper-input';
+    telInput.className = 'tm-tel-helper-input o_input';
 
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.textContent = 'Rech. tel';
     btn.style.fontSize = '12px';
     btn.style.padding = '2px 6px';
+    btn.className = 'tm-tel-btn btn btn-primary';
 
     const doSearch = () => {
       const q = (telInput.value || '').trim();
@@ -430,6 +468,7 @@
     const input = findClientInput(root);
     if (!input) return;
 
+    ensureThemeStyles();
     const wrapper = document.createElement('div');
     wrapper.className = 'tm-tel-helper-wrapper';
     wrapper.style.marginTop = '12px';
@@ -440,16 +479,17 @@
     telInput.type = 'text';
     telInput.placeholder = 'n° téléphone';
     telInput.title = 'Rechercher par téléphone (+33, espaces et points acceptés)';
-    telInput.style.width = '200px';
+    telInput.style.width = '220px';
     telInput.style.padding = '2px 6px';
     telInput.style.fontSize = '12px';
-    telInput.className = 'tm-tel-helper-input';
+    telInput.className = 'tm-tel-helper-input o_input';
 
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.textContent = 'Rech. tel';
     btn.style.fontSize = '12px';
     btn.style.padding = '2px 6px';
+    btn.className = 'tm-tel-btn btn btn-primary';
 
     const doSearch = () => {
       const q = (telInput.value || '').trim();
