@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odoo – Recherche Client par Téléphone (Many2one)
 // @namespace    https://votre-domaine
-// @version      1.2
+// @version      1.4
 // @description  Active la recherche "Téléphone/Mobile" automatiquement dans le champ Client des tickets Odoo.
 // @match        *://*/web*
 // @match        https://winprovence.odoo.com/*
@@ -33,6 +33,7 @@
   const TEL_PREFIX = 'tel:';           // saisir "tel:0494..." force la recherche
   const INTERNAL_INPUT_FLAG = 'tmTelInternal'; // drapeau pour ignorer les événements 'input' déclenchés par le script
   let THEME_STYLES_INJECTED = false;
+  const MIN_SUGGEST_DIGITS = 5;        // afficher les suggestions à partir de 5 chiffres
 
   // Utilitaires
   const isDigitsLike = (s) => /^[+\d][\d .-]{2,}$/.test(s);
@@ -79,7 +80,7 @@
     style.setAttribute('data-tm', 'tel-helper-styles');
     style.textContent = `
       .tm-tel-helper-wrapper{
-        display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+        display:flex; align-items:center; gap:8px; flex-wrap:wrap; position: relative;
       }
       .tm-tel-helper-wrapper .tm-tel-input{
         border-radius:8px; padding:6px 10px; min-width:220px; height:32px;
@@ -100,6 +101,19 @@
       .tm-tel-helper-wrapper .tm-tel-btn:hover{
         filter: brightness(1.08);
       }
+      .tm-tel-suggestions{
+        position:absolute; left:0; top: calc(100% + 4px);
+        background: var(--o-dropdown-menu-bg, var(--o-view-background-color, #1e1e2d));
+        border: 1px solid var(--o-input-border-color, rgba(255,255,255,0.12));
+        border-radius:8px; box-shadow: 0 6px 18px rgba(0,0,0,.25);
+        max-height: 260px; overflow:auto; z-index: 10000; min-width: 260px;
+      }
+      .tm-tel-suggestion-item{
+        padding:8px 10px; cursor: pointer; display:flex; align-items:center; justify-content:space-between; gap:10px;
+      }
+      .tm-tel-suggestion-item:hover{ background: rgba(135,90,123,.12); }
+      .tm-tel-suggestion-name{ font-weight:600; }
+      .tm-tel-suggestion-phone{ opacity:.8; font-size:.9em; }
     `;
     document.head.appendChild(style);
   }
@@ -205,6 +219,98 @@
       }
     }
     return { query: phoneRaw, records: [] };
+  }
+
+  // -----------------------------
+  // UI - suggestions sur le champ téléphone
+  // -----------------------------
+  function getOrCreateDropdown(telInput) {
+    let dd = telInput._tmDropdown;
+    if (dd && dd.isConnected) return dd;
+    dd = document.createElement('div');
+    dd.className = 'tm-tel-suggestions';
+    dd.style.display = 'none';
+    telInput._tmDropdown = dd;
+    const wrapper = telInput.closest('.tm-tel-helper-wrapper') || telInput.parentElement;
+    wrapper && wrapper.appendChild(dd);
+    return dd;
+  }
+
+  function hideDropdown(telInput) {
+    const dd = telInput && telInput._tmDropdown;
+    if (dd) dd.style.display = 'none';
+  }
+
+  function renderSuggestions(telInput, records, targetInput) {
+    const dd = getOrCreateDropdown(telInput);
+    dd.innerHTML = '';
+    if (!records || records.length === 0) {
+      dd.style.display = 'none';
+      return;
+    }
+    const width = Math.max(260, telInput.offsetWidth);
+    dd.style.minWidth = width + 'px';
+    records.slice(0, 20).forEach((r) => {
+      const item = document.createElement('div');
+      item.className = 'tm-tel-suggestion-item';
+      const name = document.createElement('div');
+      name.className = 'tm-tel-suggestion-name';
+      name.textContent = r.display_name || 'Client';
+      const phone = document.createElement('div');
+      phone.className = 'tm-tel-suggestion-phone';
+      phone.textContent = r.phone || r.mobile || '';
+      item.appendChild(name);
+      item.appendChild(phone);
+      item.addEventListener('click', async () => {
+        await selectPartnerInMany2One(targetInput, r);
+        hideDropdown(telInput);
+      });
+      dd.appendChild(item);
+    });
+    dd.style.display = 'block';
+  }
+
+  function attachTelInputSuggestions(telInput, targetInput) {
+    if (telInput.dataset.tmSuggestAttached) return;
+    telInput.dataset.tmSuggestAttached = '1';
+    let t;
+    telInput.addEventListener('input', () => {
+      const value = (telInput.value || '').trim();
+      const num = onlyDigitsPlus(value).replace(/\D/g, '');
+      if (num.length >= MIN_SUGGEST_DIGITS) {
+        clearTimeout(t);
+        t = setTimeout(async () => {
+          try {
+            const { records } = await rpcSearchPartnerByPhone(value, { limit: 30 });
+            renderSuggestions(telInput, records, targetInput);
+          } catch (_) {
+            hideDropdown(telInput);
+          }
+        }, 200);
+      } else {
+        hideDropdown(telInput);
+      }
+    });
+    // cacher à l'extérieur
+    document.addEventListener('click', (e) => {
+      const dd = telInput._tmDropdown;
+      if (!dd) return;
+      const inside = dd.contains(e.target) || telInput.contains(e.target);
+      if (!inside) hideDropdown(telInput);
+    });
+    // Enter sélectionne le premier
+    telInput.addEventListener('keydown', async (e) => {
+      if (e.key === 'Enter') {
+        const dd = telInput._tmDropdown;
+        const first = dd && dd.querySelector('.tm-tel-suggestion-item');
+        if (first) {
+          e.preventDefault();
+          first.click();
+        }
+      } else if (e.key === 'Escape') {
+        hideDropdown(telInput);
+      }
+    });
   }
 
   function findPartnerMenuItemByIdOrName(menus, partner) {
@@ -460,6 +566,9 @@
     }
     host.appendChild(wrapper);
 
+    // Suggestions sur saisie
+    attachTelInputSuggestions(telInput, input);
+
     // Si une UI flottante existe déjà, la retirer pour éviter la duplication
     removeFloatingPhoneUI();
   }
@@ -521,6 +630,9 @@
       document.body;
     sheet.appendChild(wrapper);
     removeFloatingPhoneUI();
+
+    // Suggestions sur saisie
+    attachTelInputSuggestions(telInput, input);
   }
 
   function cleanupWrongHelpers() {
