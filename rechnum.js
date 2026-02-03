@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odoo – Recherche Client par Téléphone (Many2one)
 // @namespace    https://votre-domaine
-// @version      1.4
+// @version      1.6
 // @description  Active la recherche "Téléphone/Mobile" automatiquement dans le champ Client des tickets Odoo.
 // @match        *://*/web*
 // @match        https://winprovence.odoo.com/*
@@ -38,6 +38,33 @@
   // Utilitaires
   const isDigitsLike = (s) => /^[+\d][\d .-]{2,}$/.test(s);
   const onlyDigitsPlus = (s) => (s || '').replace(/[^\d+]/g, '');
+
+  // Normalisation + matching exact du téléphone
+  function normalizeDigits(s) {
+    return onlyDigitsPlus(s).replace(/\D/g, '');
+  }
+  function getNormalizedVariants(raw) {
+    const vs = buildPhoneVariantsForSearch(raw || '').map((v) => normalizeDigits(v));
+    return Array.from(new Set(vs.filter(Boolean)));
+  }
+  function getRecordPhonesNormalized(rec) {
+    const vals = [];
+    if (rec && rec.phone) vals.push(normalizeDigits(rec.phone));
+    if (rec && rec.mobile) vals.push(normalizeDigits(rec.mobile));
+    return Array.from(new Set(vals.filter(Boolean)));
+  }
+  function findExactPhoneMatches(records, rawQuery) {
+    const targets = getNormalizedVariants(rawQuery);
+    return (records || []).filter((r) => {
+      const rp = getRecordPhonesNormalized(r);
+      return rp.some((p) => targets.includes(p));
+    });
+  }
+  function findHelperInputForTargetInput(targetInput) {
+    const widget = targetInput && targetInput.closest('.o_field_many2one, .o_field_widget');
+    if (!widget) return null;
+    return widget.querySelector('.tm-tel-helper-input') || null;
+  }
 
   function visibleMenus(root = document) {
     // Supporte anciens (jQuery UI) et nouveaux menus (OWL)
@@ -198,7 +225,7 @@
             }),
             count_limit: 10001,
             domain: ['&', '|', ['company_id', '=', false], ['company_id', '=', companyId], ['phone_mobile_search', 'ilike', q]],
-            fields: ['id', 'display_name', 'phone', 'mobile', 'email', 'is_company', 'parent_id'],
+            fields: ['id', 'display_name', 'phone', 'mobile', 'email', 'is_company', 'parent_id', 'city'],
           },
         },
       };
@@ -258,7 +285,10 @@
       name.textContent = r.display_name || 'Client';
       const phone = document.createElement('div');
       phone.className = 'tm-tel-suggestion-phone';
-      phone.textContent = r.phone || r.mobile || '';
+      const parts = [];
+      if (r.phone || r.mobile) parts.push(r.phone || r.mobile);
+      if (r.city) parts.push(String(r.city));
+      phone.textContent = parts.join(' • ');
       item.appendChild(name);
       item.appendChild(phone);
       item.addEventListener('click', async () => {
@@ -318,13 +348,28 @@
       const items = Array.from(
         ul.querySelectorAll('li.ui-menu-item, .o_m2o_dropdown_option, .o_selection_item, li')
       );
+      // 1) Privilégier un match par id (quand présent dans le DOM)
       let match = items.find((li) => {
         const idAttr = li.getAttribute('data-record-id') || li.getAttribute('data-id');
         if (idAttr && String(idAttr) === String(partner.id)) return true;
-        const text = (li.textContent || '').trim();
-        return text.includes(partner.display_name);
+        return false;
       });
       if (match) return match;
+      // 2) Sinon, tenter par nom + ville
+      const byName = items.filter((li) => {
+        const text = (li.textContent || '').trim();
+        return text.includes(partner.display_name || '');
+      });
+      if (byName.length === 1) return byName[0];
+      if (byName.length > 1 && partner.city) {
+        const cityUpper = String(partner.city || '').trim().toUpperCase();
+        const byCity = byName.filter((li) => {
+          const t = (li.textContent || '').toUpperCase();
+          return cityUpper && t.includes(cityUpper);
+        });
+        if (byCity.length === 1) return byCity[0];
+        if (byCity.length > 1) return byCity[0];
+      }
     }
     return null;
   }
@@ -351,6 +396,7 @@
     input.dispatchEvent(new Event('input', { bubbles: true }));
     // Attendre l'ouverture du menu puis cliquer sur l'option correspondant à l'id/nom
     let tries = 0;
+    let triedNameWithCity = false;
     while (tries++ < 25) {
       const menus = visibleMenus();
       const item = findPartnerMenuItemByIdOrName(menus, partner);
@@ -362,15 +408,11 @@
         target.dispatchEvent(new MouseEvent('click', evOpts));
         return true;
       }
-      // Si on ne trouve pas exactement l'item, sélectionner la première ligne de résultat non-option
-      const firstRecord = findFirstRecordItem(menus);
-      if (firstRecord) {
-        const target = firstRecord.querySelector('a,button,div,span') || firstRecord;
-        const evOpts = { bubbles: true, cancelable: true, view: window };
-        target.dispatchEvent(new MouseEvent('mousedown', evOpts));
-        target.dispatchEvent(new MouseEvent('mouseup', evOpts));
-        target.dispatchEvent(new MouseEvent('click', evOpts));
-        return true;
+      // Pour les noms ambigus, essayer "nom + ville" pour filtrer le menu
+      if (!triedNameWithCity && partner.city && tries > 6) {
+        triedNameWithCity = true;
+        input.value = `${partner.display_name} ${partner.city}`.trim();
+        input.dispatchEvent(new Event('input', { bubbles: true }));
       }
       await new Promise((r) => setTimeout(r, 120));
     }
@@ -538,10 +580,14 @@
       // Recherche directe via RPC puis sélection dans la liste déroulante
       rpcSearchPartnerByPhone(q, { limit: 20 })
         .then(async ({ records }) => {
-          if (records && records.length) {
-            const chosen = records[0];
-            await selectPartnerInMany2One(input, chosen);
+          if (!records || !records.length) return;
+          const exact = findExactPhoneMatches(records, q);
+          if (exact.length === 1) {
+            await selectPartnerInMany2One(input, exact[0]);
+            return;
           }
+          // Plusieurs ou aucune correspondance exacte: afficher des suggestions
+          renderSuggestions(telInput, exact.length ? exact : records, input);
         })
         .catch(() => {});
     };
@@ -605,10 +651,13 @@
       if (!q) return;
       rpcSearchPartnerByPhone(q, { limit: 20 })
         .then(async ({ records }) => {
-          if (records && records.length) {
-            const chosen = records[0];
-            await selectPartnerInMany2One(input, chosen);
+          if (!records || !records.length) return;
+          const exact = findExactPhoneMatches(records, q);
+          if (exact.length === 1) {
+            await selectPartnerInMany2One(input, exact[0]);
+            return;
           }
+          renderSuggestions(telInput, exact.length ? exact : records, input);
         })
         .catch(() => {});
     };
@@ -750,10 +799,15 @@
       clientInput.focus();
       rpcSearchPartnerByPhone(q, { limit: 20 })
         .then(async ({ records }) => {
-          if (records && records.length) {
-            const chosen = records[0];
-            await selectPartnerInMany2One(clientInput, chosen);
+          if (!records || !records.length) return;
+          const exact = findExactPhoneMatches(records, q);
+          if (exact.length === 1) {
+            await selectPartnerInMany2One(clientInput, exact[0]);
+            return;
           }
+          // S'il y a une UI locale, afficher les suggestions; sinon, ne pas auto-sélectionner
+          const helper = findHelperInputForTargetInput(clientInput);
+          if (helper) renderSuggestions(helper, exact.length ? exact : records, clientInput);
         })
         .catch(() => {});
     };
@@ -877,21 +931,36 @@
       const menus = visibleMenus();
       const phoneItem = findPhoneSuggestion(menus, currentQuery);
       if (phoneItem) {
-        phoneItem.click();
+        // Ne pas cliquer directement: prioriser une sélection fiable via RPC + match exact
         clearInterval(timer);
+        rpcSearchPartnerByPhone(currentQuery, { limit: 30 })
+          .then(async ({ records }) => {
+            if (!records || !records.length) return;
+            const exact = findExactPhoneMatches(records, currentQuery);
+            if (exact.length === 1) {
+              await selectPartnerInMany2One(input, exact[0]);
+              return;
+            }
+            const helper = findHelperInputForTargetInput(input);
+            if (helper) renderSuggestions(helper, exact.length ? exact : records, input);
+          })
+          .catch(() => {});
       } else if (attempts > 18) {
         clearInterval(timer);
         // Fallback sans ouvrir la modale: appel RPC direct et sélection dans la liste déroulante
         rpcSearchPartnerByPhone(currentQuery, { limit: 20 })
           .then(async ({ records }) => {
-            if (records && records.length) {
-              // sélectionner le premier résultat
-              const chosen = records[0];
-              await selectPartnerInMany2One(input, chosen);
+            if (!records || !records.length) return;
+            // Prioriser les correspondances exactes (normalisées)
+            const exact = findExactPhoneMatches(records, currentQuery);
+            if (exact.length === 1) {
+              await selectPartnerInMany2One(input, exact[0]);
               return;
             }
-            // Si aucun résultat RPC, ne pas ouvrir la modale pour respecter la consigne utilisateur
-            // (laisser l'utilisateur ajuster la saisie)
+            // Plusieurs ou aucune exact: si possible, afficher des suggestions près du champ aide
+            const helper = findHelperInputForTargetInput(input);
+            if (helper) renderSuggestions(helper, exact.length ? exact : records, input);
+            // Sinon, ne rien sélectionner automatiquement
           })
           .catch(() => {});
       }
