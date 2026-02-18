@@ -21,8 +21,8 @@
 // @match        https://winprovence.odoo.fr/*
 // @match        http://winprovence.odoo.fr/*
 // @match        http://winprovence.odoo.fr/*
-// @updateURL    https://raw.githubusercontent.com/lax3is/Script-odoo/refs/heads/main/Bouton Traiter l'Appel Odoo.js
-// @downloadURL  https://raw.githubusercontent.com/lax3is/Script-odoo/refs/heads/main/Bouton Traiter l'Appel Odoo.js
+// @updateURL    https://raw.githubusercontent.com/lax3is/rechercheparnumerodDEV/refs/heads/main/rechnum.js
+// @downloadURL  https://raw.githubusercontent.com/lax3is/rechercheparnumerodDEV/refs/heads/main/rechnum.js
 // @grant        none
 // ==/UserScript==
 
