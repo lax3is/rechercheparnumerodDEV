@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Odoo – Recherche Client par Téléphone (Many2one)
 // @namespace    https://votre-domaine
-// @version      1.8
+// @version      1.9
 // @description  Active la recherche "Téléphone/Mobile" automatiquement dans le champ Client des tickets Odoo.
 // @match        *://*/web*
 // @match        https://winprovence.odoo.com/*
@@ -42,33 +42,6 @@
   const isDigitsLike = (s) => /^[+\d][\d .-]{2,}$/.test(s);
   const onlyDigitsPlus = (s) => (s || '').replace(/[^\d+]/g, '');
 
-  // Normalisation + matching exact du téléphone
-  function normalizeDigits(s) {
-    return onlyDigitsPlus(s).replace(/\D/g, '');
-  }
-  function getNormalizedVariants(raw) {
-    const vs = buildPhoneVariantsForSearch(raw || '').map((v) => normalizeDigits(v));
-    return Array.from(new Set(vs.filter(Boolean)));
-  }
-  function getRecordPhonesNormalized(rec) {
-    const vals = [];
-    if (rec && rec.phone) vals.push(normalizeDigits(rec.phone));
-    if (rec && rec.mobile) vals.push(normalizeDigits(rec.mobile));
-    return Array.from(new Set(vals.filter(Boolean)));
-  }
-  function findExactPhoneMatches(records, rawQuery) {
-    const targets = getNormalizedVariants(rawQuery);
-    return (records || []).filter((r) => {
-      const rp = getRecordPhonesNormalized(r);
-      return rp.some((p) => targets.includes(p));
-    });
-  }
-  function findHelperInputForTargetInput(targetInput) {
-    const widget = targetInput && targetInput.closest('.o_field_many2one, .o_field_widget');
-    if (!widget) return null;
-    return widget.querySelector('.tm-tel-helper-input') || null;
-  }
-
   function visibleMenus(root = document) {
     // Supporte anciens (jQuery UI) et nouveaux menus (OWL)
     const selectors = [
@@ -77,6 +50,8 @@
       '.o-autocomplete--dropdown-menu',
       '.o-dropdown--menu',
     ];
+
+
     const nodes = selectors.flatMap((sel) => Array.from(root.querySelectorAll(sel)));
     return nodes.filter((el) => !!(el.offsetParent || el.getClientRects().length));
   }
@@ -228,7 +203,7 @@
             }),
             count_limit: 10001,
             domain: ['&', '|', ['company_id', '=', false], ['company_id', '=', companyId], ['phone_mobile_search', 'ilike', q]],
-            fields: ['id', 'display_name', 'phone', 'mobile', 'email', 'is_company', 'parent_id', 'city'],
+            fields: ['id', 'display_name', 'phone', 'mobile', 'email', 'is_company', 'parent_id'],
           },
         },
       };
@@ -288,10 +263,7 @@
       name.textContent = r.display_name || 'Client';
       const phone = document.createElement('div');
       phone.className = 'tm-tel-suggestion-phone';
-      const parts = [];
-      if (r.phone || r.mobile) parts.push(r.phone || r.mobile);
-      if (r.city) parts.push(String(r.city));
-      phone.textContent = parts.join(' • ');
+      phone.textContent = r.phone || r.mobile || '';
       item.appendChild(name);
       item.appendChild(phone);
       item.addEventListener('click', async () => {
@@ -351,28 +323,13 @@
       const items = Array.from(
         ul.querySelectorAll('li.ui-menu-item, .o_m2o_dropdown_option, .o_selection_item, li')
       );
-      // 1) Privilégier un match par id (quand présent dans le DOM)
       let match = items.find((li) => {
         const idAttr = li.getAttribute('data-record-id') || li.getAttribute('data-id');
         if (idAttr && String(idAttr) === String(partner.id)) return true;
-        return false;
+        const text = (li.textContent || '').trim();
+        return text.includes(partner.display_name);
       });
       if (match) return match;
-      // 2) Sinon, tenter par nom + ville
-      const byName = items.filter((li) => {
-        const text = (li.textContent || '').trim();
-        return text.includes(partner.display_name || '');
-      });
-      if (byName.length === 1) return byName[0];
-      if (byName.length > 1 && partner.city) {
-        const cityUpper = String(partner.city || '').trim().toUpperCase();
-        const byCity = byName.filter((li) => {
-          const t = (li.textContent || '').toUpperCase();
-          return cityUpper && t.includes(cityUpper);
-        });
-        if (byCity.length === 1) return byCity[0];
-        if (byCity.length > 1) return byCity[0];
-      }
     }
     return null;
   }
@@ -397,25 +354,38 @@
     input.focus();
     input.value = partner.display_name;
     input.dispatchEvent(new Event('input', { bubbles: true }));
+    // Forcer l'ouverture du dropdown (OWL) pour permettre le clic auto
+    try {
+      input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 }));
+      input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'ArrowDown', code: 'ArrowDown', keyCode: 40, which: 40 }));
+    } catch (_) {}
     // Attendre l'ouverture du menu puis cliquer sur l'option correspondant à l'id/nom
     let tries = 0;
-    let triedNameWithCity = false;
     while (tries++ < 25) {
       const menus = visibleMenus();
       const item = findPartnerMenuItemByIdOrName(menus, partner);
       if (item) {
-        const target = item.querySelector('a,button,div,span') || item;
-        const evOpts = { bubbles: true, cancelable: true, view: window };
+        const candidates = [item, ...Array.from(item.querySelectorAll('a,button,div,span'))];
+        const prefer = candidates
+          .map((el) => ({ el, text: ((el.textContent || '')).trim() }))
+          .filter((x) => x.text && x.text.includes(partner.display_name) && !/SPEEK_/i.test(x.text))
+          .sort((a, b) => a.text.length - b.text.length)[0];
+        const target = (prefer && prefer.el) || item.querySelector('a,button,div,span') || item;
+        const evOpts = { bubbles: true, cancelable: true };
         target.dispatchEvent(new MouseEvent('mousedown', evOpts));
         target.dispatchEvent(new MouseEvent('mouseup', evOpts));
         target.dispatchEvent(new MouseEvent('click', evOpts));
         return true;
       }
-      // Pour les noms ambigus, essayer "nom + ville" pour filtrer le menu
-      if (!triedNameWithCity && partner.city && tries > 6) {
-        triedNameWithCity = true;
-        input.value = `${partner.display_name} ${partner.city}`.trim();
-        input.dispatchEvent(new Event('input', { bubbles: true }));
+      // Si on ne trouve pas exactement l'item, sélectionner la première ligne de résultat non-option
+      const firstRecord = findFirstRecordItem(menus);
+      if (firstRecord) {
+        const target = firstRecord.querySelector('a,button,div,span') || firstRecord;
+        const evOpts = { bubbles: true, cancelable: true };
+        target.dispatchEvent(new MouseEvent('mousedown', evOpts));
+        target.dispatchEvent(new MouseEvent('mouseup', evOpts));
+        target.dispatchEvent(new MouseEvent('click', evOpts));
+        return true;
       }
       await new Promise((r) => setTimeout(r, 120));
     }
@@ -442,7 +412,7 @@
         }
         if (item) {
           const target = item.querySelector('a,button,div,span') || item;
-          const evOpts = { bubbles: true, cancelable: true, view: window };
+          const evOpts = { bubbles: true, cancelable: true };
           target.dispatchEvent(new MouseEvent('mousedown', evOpts));
           target.dispatchEvent(new MouseEvent('mouseup', evOpts));
           target.dispatchEvent(new MouseEvent('click', evOpts));
@@ -500,7 +470,7 @@
       const phoneItem = findPhoneSuggestion(menus, query);
       if (phoneItem) {
         const target = phoneItem.querySelector('a,button,div,span') || phoneItem;
-        const evOpts = { bubbles: true, cancelable: true, view: window };
+        const evOpts = { bubbles: true, cancelable: true };
         target.dispatchEvent(new MouseEvent('mousedown', evOpts));
         target.dispatchEvent(new MouseEvent('mouseup', evOpts));
         target.dispatchEvent(new MouseEvent('click', evOpts));
@@ -583,14 +553,10 @@
       // Recherche directe via RPC puis sélection dans la liste déroulante
       rpcSearchPartnerByPhone(q, { limit: 20 })
         .then(async ({ records }) => {
-          if (!records || !records.length) return;
-          const exact = findExactPhoneMatches(records, q);
-          if (exact.length === 1) {
-            await selectPartnerInMany2One(input, exact[0]);
-            return;
+          if (records && records.length) {
+            const chosen = records[0];
+            await selectPartnerInMany2One(input, chosen);
           }
-          // Plusieurs ou aucune correspondance exacte: afficher des suggestions
-          renderSuggestions(telInput, exact.length ? exact : records, input);
         })
         .catch(() => {});
     };
@@ -654,13 +620,10 @@
       if (!q) return;
       rpcSearchPartnerByPhone(q, { limit: 20 })
         .then(async ({ records }) => {
-          if (!records || !records.length) return;
-          const exact = findExactPhoneMatches(records, q);
-          if (exact.length === 1) {
-            await selectPartnerInMany2One(input, exact[0]);
-            return;
+          if (records && records.length) {
+            const chosen = records[0];
+            await selectPartnerInMany2One(input, chosen);
           }
-          renderSuggestions(telInput, exact.length ? exact : records, input);
         })
         .catch(() => {});
     };
@@ -802,15 +765,10 @@
       clientInput.focus();
       rpcSearchPartnerByPhone(q, { limit: 20 })
         .then(async ({ records }) => {
-          if (!records || !records.length) return;
-          const exact = findExactPhoneMatches(records, q);
-          if (exact.length === 1) {
-            await selectPartnerInMany2One(clientInput, exact[0]);
-            return;
+          if (records && records.length) {
+            const chosen = records[0];
+            await selectPartnerInMany2One(clientInput, chosen);
           }
-          // S'il y a une UI locale, afficher les suggestions; sinon, ne pas auto-sélectionner
-          const helper = findHelperInputForTargetInput(clientInput);
-          if (helper) renderSuggestions(helper, exact.length ? exact : records, clientInput);
         })
         .catch(() => {});
     };
@@ -845,6 +803,11 @@
     }
   }
 
+  // Alias: certaines parties du bridge utilisent ce nom
+  function isHelpdeskTicketFormRoute() {
+    return isTicketFormContext();
+  }
+
   function cleanupAllHelpers() {
     Array.from(document.querySelectorAll('.tm-tel-helper-wrapper')).forEach((el) => {
       if (el && el.parentElement) el.parentElement.removeChild(el);
@@ -868,7 +831,7 @@
           null;
         if (row) {
           const target = row.querySelector('td,div,span') || row;
-          const evOpts = { bubbles: true, cancelable: true, view: window };
+          const evOpts = { bubbles: true, cancelable: true };
           target.dispatchEvent(new MouseEvent('mousedown', evOpts));
           target.dispatchEvent(new MouseEvent('mouseup', evOpts));
           target.dispatchEvent(new MouseEvent('click', evOpts));
@@ -934,36 +897,21 @@
       const menus = visibleMenus();
       const phoneItem = findPhoneSuggestion(menus, currentQuery);
       if (phoneItem) {
-        // Ne pas cliquer directement: prioriser une sélection fiable via RPC + match exact
+        phoneItem.click();
         clearInterval(timer);
-        rpcSearchPartnerByPhone(currentQuery, { limit: 30 })
-          .then(async ({ records }) => {
-            if (!records || !records.length) return;
-            const exact = findExactPhoneMatches(records, currentQuery);
-            if (exact.length === 1) {
-              await selectPartnerInMany2One(input, exact[0]);
-              return;
-            }
-            const helper = findHelperInputForTargetInput(input);
-            if (helper) renderSuggestions(helper, exact.length ? exact : records, input);
-          })
-          .catch(() => {});
       } else if (attempts > 18) {
         clearInterval(timer);
         // Fallback sans ouvrir la modale: appel RPC direct et sélection dans la liste déroulante
         rpcSearchPartnerByPhone(currentQuery, { limit: 20 })
           .then(async ({ records }) => {
-            if (!records || !records.length) return;
-            // Prioriser les correspondances exactes (normalisées)
-            const exact = findExactPhoneMatches(records, currentQuery);
-            if (exact.length === 1) {
-              await selectPartnerInMany2One(input, exact[0]);
+            if (records && records.length) {
+              // sélectionner le premier résultat
+              const chosen = records[0];
+              await selectPartnerInMany2One(input, chosen);
               return;
             }
-            // Plusieurs ou aucune exact: si possible, afficher des suggestions près du champ aide
-            const helper = findHelperInputForTargetInput(input);
-            if (helper) renderSuggestions(helper, exact.length ? exact : records, input);
-            // Sinon, ne rien sélectionner automatiquement
+            // Si aucun résultat RPC, ne pas ouvrir la modale pour respecter la consigne utilisateur
+            // (laisser l'utilisateur ajuster la saisie)
           })
           .catch(() => {});
       }
@@ -1049,4 +997,425 @@
     }
   });
   mo.observe(document.documentElement, { childList: true, subtree: true });
+
+  // -----------------------------
+  // Bridge Speek → Odoo (sans serveur)
+  // Objectif:
+  // - fallback URL: lire #phone/#team/#subject et remplir
+  // - mode direct: sur F8, attendre un collage JSON (Ctrl+V) depuis l'app Windows,
+  //   puis remplir Client + Équipe + Subject.
+  // -----------------------------
+  const BRIDGE_FKEY = 8; // F8
+  const PENDING_KEY = 'tm_speek_payload';
+
+  function keepReadyTag() {
+    try {
+      const ready =
+        isHelpdeskTicketFormRoute() &&
+        isClientFieldEmpty() &&
+        !!findClientInput(document) &&
+        !!(
+          document.querySelector('.o_field_widget[name="name"] input') ||
+          document.querySelector('.o_field_widget[name="name"] textarea') ||
+          document.querySelector('input[name="name"]')
+        ) &&
+        !!(
+          document.querySelector('.o_field_widget[name="team_id"] input') ||
+          document.querySelector('.o_field_widget[name="team_id"] textarea') ||
+          document.querySelector('input[name="team_id"]')
+        );
+
+      const cur = document.title || '';
+      const has = cur.includes('SPEEK_READY');
+      if (ready && !has) {
+        const base = cur.replace(/\s*\|\s*SPEEK_(ARMED|READY|PAGE_OK|OK)(:[a-z0-9]+)?/ig, '').trim();
+        document.title = base ? `${base} | SPEEK_READY` : 'SPEEK_READY';
+      } else if (!ready && has) {
+        document.title = cur.replace(/\s*\|\s*SPEEK_READY\b/ig, '').trim();
+      }
+    } catch (_) {}
+  }
+
+  // Keep READY resilient to Odoo title rewrites / slow PCs
+  // (plus léger pour PC lents)
+  setInterval(keepReadyTag, 1000);
+
+  function extractBridgePayloadFromHash() {
+    try {
+      const hash = (location.hash || '').replace(/^#/, '');
+      const params = new URLSearchParams(hash);
+      const phone = (params.get('phone') || params.get('tel') || '').trim();
+      const team = (params.get('team') || '').trim();
+      const subject = (params.get('subject') || '').trim();
+      if (!phone && !team && !subject) return null;
+      return { phone, team, subject };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearBridgePayloadFromHash() {
+    try {
+      const hash = (location.hash || '').replace(/^#/, '');
+      const params = new URLSearchParams(hash);
+      params.delete('phone');
+      params.delete('tel');
+      params.delete('team');
+      params.delete('subject');
+      const newHash = params.toString();
+      const url = location.pathname + location.search + (newHash ? '#' + newHash : '');
+      history.replaceState(null, '', url);
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  function safeJsonParse(text) {
+    try {
+      const v = JSON.parse(text);
+      if (!v || typeof v !== 'object') return null;
+      return v;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function setPendingPayload(p) {
+    try {
+      sessionStorage.setItem(PENDING_KEY, JSON.stringify(p));
+    } catch (_) {}
+  }
+
+  function getPendingPayload() {
+    try {
+      const raw = sessionStorage.getItem(PENDING_KEY) || '';
+      return raw ? safeJsonParse(raw) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function clearPendingPayload() {
+    try {
+      sessionStorage.removeItem(PENDING_KEY);
+    } catch (_) {}
+  }
+
+  function tryPasteIntoTelHelperAndSearch(phone) {
+    const telInput = document.querySelector('input.tm-tel-helper-input');
+    if (!(telInput instanceof HTMLInputElement)) return false;
+
+    telInput.focus();
+    telInput.value = phone;
+    telInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    const wrapper = telInput.closest('.tm-tel-helper-wrapper') || telInput.parentElement;
+    const btn = wrapper && wrapper.querySelector('button.tm-tel-btn');
+    if (btn instanceof HTMLButtonElement) {
+      btn.click();
+      return true;
+    }
+
+    // fallback: Enter (ton script écoute déjà Enter sur ce champ)
+    try {
+      telInput.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+        })
+      );
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function isClientFieldEmpty() {
+    try {
+      const clientInput =
+        document.querySelector('input#partner_id') ||
+        document.querySelector('.o_field_widget[name="partner_id"] input') ||
+        document.querySelector('.o_field_many2one[name="partner_id"] input') ||
+        null;
+      if (!(clientInput instanceof HTMLInputElement)) return true;
+      return !(clientInput.value || '').trim();
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function setSubject(subject) {
+    const s = (subject || '').trim();
+    if (!s) return false;
+    const el =
+      document.querySelector('.o_field_widget[name="name"] input') ||
+      document.querySelector('.o_field_widget[name="name"] textarea') ||
+      document.querySelector('input[name="name"]') ||
+      null;
+    if (!(el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) return false;
+    el.focus();
+    el.value = s;
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    el.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  }
+
+  async function setTeamByText(teamText) {
+    const t = (teamText || '').trim();
+    if (!t) return false;
+    const input =
+      document.querySelector('.o_field_widget[name="team_id"] input') ||
+      document.querySelector('.o_field_many2one[name="team_id"] input') ||
+      document.querySelector('input[name="team_id"]') ||
+      null;
+    if (!(input instanceof HTMLInputElement)) return false;
+
+    input.focus();
+    input.value = t;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+
+    // attendre menu, puis cliquer option qui contient le texte
+    let tries = 0;
+    while (tries++ < 20) {
+      const menus = visibleMenus(document);
+      for (const ul of menus) {
+        const items = Array.from(
+          ul.querySelectorAll('li.ui-menu-item, .o_m2o_dropdown_option, .o_selection_item, li')
+        );
+        const found = items.find((li) =>
+          ((li.textContent || '').trim().toLowerCase()).includes(t.toLowerCase())
+        );
+        if (found) {
+          const target = found.querySelector('a,button,div,span') || found;
+          target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+          target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          return true;
+        }
+      }
+      await new Promise((r) => setTimeout(r, 120));
+    }
+    // fallback: Enter
+    input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Enter', code: 'Enter', keyCode: 13, which: 13 }));
+    return true;
+  }
+
+  async function applyBridgePayloadOnce(payload) {
+    const phone = (
+      payload && (payload.Phone ?? payload.phone ?? payload.tel ?? payload.telephone) != null
+        ? String(payload.Phone ?? payload.phone ?? payload.tel ?? payload.telephone)
+        : ''
+    ).trim();
+    const team = (payload && payload.Team ? String(payload.Team) : payload.team ? String(payload.team) : '').trim();
+    const subject = (payload && payload.Subject ? String(payload.Subject) : payload.subject ? String(payload.subject) : '').trim();
+    const token = (payload && (payload.Token ?? payload.token) != null ? String(payload.Token ?? payload.token) : '').trim();
+    if (!phone && !team && !subject) return;
+
+    // Mode clinique: ne rien faire si on n'est pas sur le bon formulaire
+    if (!isHelpdeskTicketFormRoute()) {
+      if (payload) setPendingPayload(payload);
+      return;
+    }
+
+    // Ne jamais écraser un ticket en cours: uniquement si Client vide
+    if (!isClientFieldEmpty()) {
+      clearPendingPayload();
+      clearBridgePayloadFromHash();
+      return;
+    }
+
+    function keepTitleTag(tag, ms) {
+      try {
+        const start = Date.now();
+        const tick = () => {
+          try {
+            const cur = document.title || '';
+            if (!cur.includes(tag)) {
+              const base = cur.replace(/\s*\|\s*SPEEK_(ARMED|PAGE_OK|OK)(:[a-z0-9]+)?/ig, '').trim();
+              document.title = base ? `${base} | ${tag}` : tag;
+            }
+          } catch (_) {}
+          if (Date.now() - start >= ms) clearInterval(id);
+        };
+        tick();
+        const id = setInterval(tick, 120);
+        setTimeout(() => { try { clearInterval(id); } catch (_) {} }, ms + 200);
+      } catch (_) {}
+    }
+
+    function setTitleAck(kind) {
+      const tag = token ? `SPEEK_${kind}:${token}` : `SPEEK_${kind}`;
+      keepTitleTag(tag, 3500);
+    }
+
+    // ACK rapide via document.title (évite d'écrire dans le presse-papier)
+    if (isHelpdeskTicketFormRoute() && isClientFieldEmpty()) {
+      setTitleAck('PAGE_OK');
+    }
+
+    // attendre que TON champ soit injecté, puis appliquer
+    const start = Date.now();
+    while (Date.now() - start < 12000) {
+      scanAndAttach();
+      // Vérifications strictes: si un champ est introuvable, ne rien faire maintenant
+      const clientInput = findClientInput(document);
+      const clientOk = !phone || !!clientInput;
+      const subjectOk = !subject || !!(
+        document.querySelector('.o_field_widget[name="name"] input') ||
+        document.querySelector('.o_field_widget[name="name"] textarea') ||
+        document.querySelector('input[name="name"]')
+      );
+      const teamOk = !team || !!(
+        document.querySelector('.o_field_widget[name="team_id"] input') ||
+        document.querySelector('.o_field_widget[name="team_id"] textarea') ||
+        document.querySelector('input[name="team_id"]')
+      );
+      const phoneOk = !phone || !!document.querySelector('input.tm-tel-helper-input') || !!clientInput;
+
+      if (!clientOk || !subjectOk || !teamOk || !phoneOk) {
+        if (payload) setPendingPayload(payload);
+        await new Promise((r) => setTimeout(r, 250));
+        continue;
+      }
+
+      // 1) subject
+      if (subject) setSubject(subject);
+      // 2) team
+      if (team) await setTeamByText(team);
+      // 3) phone -> client
+      if (phone && clientInput) {
+        let selected = false;
+        try {
+          const { records } = await rpcSearchPartnerByPhone(phone, { limit: 20 });
+          if (records && records.length) {
+            selected = await selectPartnerInMany2One(clientInput, records[0]);
+          }
+        } catch (_) {}
+
+        // Fallback: helper UI if present
+        if (!selected) {
+          try {
+            selected = tryPasteIntoTelHelperAndSearch(phone);
+          } catch (_) {}
+        }
+
+        if (selected) {
+          // Attendre que le champ Client soit réellement rempli (sinon pas d'ACK)
+          const t0 = Date.now();
+          while (Date.now() - t0 < 6000 && isClientFieldEmpty()) {
+            await new Promise((r) => setTimeout(r, 150));
+          }
+
+          // Nettoyage: si un tag SPEEK s'est glissé dans l'affichage, on le retire sans toucher l'id sélectionné
+          try {
+            const ci =
+              document.querySelector('input#partner_id') ||
+              document.querySelector('.o_field_widget[name="partner_id"] input') ||
+              document.querySelector('.o_field_many2one[name="partner_id"] input') ||
+              null;
+            if (ci instanceof HTMLInputElement) {
+              const cleaned = (ci.value || '').replace(/SPEEK_[A-Z_]+(:[a-z0-9]+)?/ig, '').trim();
+              if (cleaned && cleaned !== ci.value) {
+                ci.value = cleaned;
+                ci.dispatchEvent(new Event('input', { bubbles: true }));
+                ci.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+            }
+          } catch (_) {}
+
+          if (!isClientFieldEmpty()) {
+            setTitleAck('OK');
+            clearPendingPayload();
+            clearBridgePayloadFromHash();
+            return;
+          }
+        }
+      }
+      if (!phone) {
+        clearPendingPayload();
+        clearBridgePayloadFromHash();
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  // IMPORTANT: l'app Windows est la source de vérité.
+  // On n'applique plus automatiquement depuis l'URL/session au chargement.
+  // On applique uniquement après réception explicite via collage JSON (F8 + Ctrl+V).
+
+  // F8: arm a paste listener to receive JSON payload from Windows app (Ctrl+V)
+  (function initPasteBridge() {
+    const ID = 'tm-speek-bridge-paste';
+    function ensurePasteBox() {
+      let el = document.getElementById(ID);
+      if (el) return el;
+      el = document.createElement('textarea');
+      el.id = ID;
+      el.style.position = 'fixed';
+      el.style.left = '-9999px';
+      el.style.top = '0';
+      el.style.width = '1px';
+      el.style.height = '1px';
+      document.body.appendChild(el);
+      return el;
+    }
+
+    let armed = false;
+    window.addEventListener('keydown', (e) => {
+      if (e.key !== `F${BRIDGE_FKEY}`) return;
+      if (e.ctrlKey || e.altKey || e.metaKey) return;
+      if (e.repeat) return;
+      e.preventDefault();
+      try { e.stopImmediatePropagation(); } catch (_) {}
+      try { e.stopPropagation(); } catch (_) {}
+
+      const box = ensurePasteBox();
+      box.focus();
+      box.value = '';
+
+      // Marqueur "armé" dans le titre: l'app Windows ne doit coller QUE si ce marqueur apparaît.
+      (function keepArmed() {
+        try {
+          const start = Date.now();
+          const tick = () => {
+            try {
+              const cur = document.title || '';
+              if (!cur.includes('SPEEK_ARMED')) {
+                const base = cur.replace(/\s*\|\s*SPEEK_(ARMED|PAGE_OK|OK)(:[a-z0-9]+)?/ig, '').trim();
+                document.title = base ? `${base} | SPEEK_ARMED` : 'SPEEK_ARMED';
+              }
+            } catch (_) {}
+            if (Date.now() - start >= 2500) clearInterval(id);
+          };
+          tick();
+          const id = setInterval(tick, 120);
+          setTimeout(() => { try { clearInterval(id); } catch (_) {} }, 2700);
+        } catch (_) {}
+      })();
+
+      if (armed) return;
+      armed = true;
+      const onPaste = async (pe) => {
+        try {
+          pe.preventDefault();
+          const text = (pe.clipboardData && pe.clipboardData.getData('text')) || '';
+          const parsed = safeJsonParse(text);
+          if (parsed) setPendingPayload(parsed);
+          try {
+            await applyBridgePayloadOnce(parsed || {});
+          } catch (_) {
+            // mode clinique: si une erreur arrive, ne rien casser
+          }
+        } finally {
+          armed = false;
+          try { box.removeEventListener('paste', onPaste); } catch (_) {}
+        }
+      };
+      box.addEventListener('paste', onPaste);
+    }, true);
+  })();
 })();
